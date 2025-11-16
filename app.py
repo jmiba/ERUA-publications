@@ -634,23 +634,18 @@ def main():
             def set_page(target: int):
                 st.session_state["preview_page"] = max(1, min(total_pages, target))
 
-            first_col.button("⏮ First", disabled=current_page == 1, on_click=set_page, args=(1,))
-            prev_col.button(
-                "◀ Previous", disabled=current_page == 1, on_click=set_page, args=(current_page - 1,)
-            )
-            next_col.button(
-                "Next ▶",
-                disabled=current_page == total_pages,
-                on_click=set_page,
-                args=(current_page + 1,),
-            )
-            last_col.button(
-                "Last ⏭", disabled=current_page == total_pages, on_click=set_page, args=(total_pages,)
-            )
+            if first_col.button("⏮ First", disabled=current_page == 1):
+                set_page(1)
+            if prev_col.button("◀ Previous", disabled=current_page == 1):
+                set_page(current_page - 1)
+            if next_col.button("Next ▶", disabled=current_page == total_pages):
+                set_page(current_page + 1)
+            if last_col.button("Last ⏭", disabled=current_page == total_pages):
+                set_page(total_pages)
+            current_page = st.session_state["preview_page"]
             info_col.markdown(f"Page **{current_page} / {total_pages}**")
         else:
             current_page = 1
-        current_page = min(max(1, st.session_state.get("preview_page", 1)), total_pages)
         start_index = (current_page - 1) * PREVIEW_PAGE_SIZE
         preview_rows = build_preview_rows(
             all_rows,
@@ -664,7 +659,9 @@ def main():
         preview_df.insert(0, "Focus", focus_mask)
         edited_df = st.data_editor(
             preview_df,
-            hide_index=True,
+            hide_index=False,
+            #start_index= 1,
+            height=1000,
             width="stretch",
             column_config={
                 "Focus": st.column_config.CheckboxColumn(
