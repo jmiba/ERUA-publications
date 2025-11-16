@@ -52,10 +52,9 @@ PREVIEW_COLUMNS = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 SDG_THRESHOLD_PERCENT = 3.0
-FOCUS_ROW_KEY_PREFIX = "preview_focus_row_"
 RADIO_CHECKBOX_CSS = """
 <style>
-div[data-testid="stCheckbox"] input[type="checkbox"] {
+div[data-testid="stDataFrame"] div[role="checkbox"] input[type="checkbox"] {
     appearance: none;
     -webkit-appearance: none;
     width: 1rem;
@@ -65,10 +64,10 @@ div[data-testid="stCheckbox"] input[type="checkbox"] {
     position: relative;
     cursor: pointer;
 }
-div[data-testid="stCheckbox"] input[type="checkbox"]:checked {
+div[data-testid="stDataFrame"] div[role="checkbox"] input[type="checkbox"]:checked {
     background-color: var(--primary-color);
 }
-div[data-testid="stCheckbox"] input[type="checkbox"]:checked::after {
+div[data-testid="stDataFrame"] div[role="checkbox"] input[type="checkbox"]:checked::after {
     content: "";
     position: absolute;
     top: 0.15rem;
@@ -872,43 +871,45 @@ def main():
     if preview_rows:
         st.subheader("Preview")
         st.markdown(RADIO_CHECKBOX_CSS, unsafe_allow_html=True)
-        focus_keys = [f"{FOCUS_ROW_KEY_PREFIX}{idx}" for idx in range(len(preview_rows))]
-        for idx, key in enumerate(focus_keys):
-            if key not in st.session_state:
-                st.session_state[key] = focus_mask[idx]
-        current_mask = [bool(st.session_state[key]) for key in focus_keys]
-        if current_mask != focus_mask:
-            selected_index = next((idx for idx, flag in enumerate(current_mask) if flag), None)
-            if selected_index is not None:
-                focus_mask = [idx == selected_index for idx in range(len(focus_keys))]
-            else:
-                focus_mask = [False] * len(focus_keys)
-
-        for idx, key in enumerate(focus_keys):
-            st.session_state[key] = focus_mask[idx]
-        st.session_state["preview_focus_mask"] = focus_mask
-        st.session_state["preview_focus_index"] = selected_index
-
-        header_cols = st.columns(len(PREVIEW_COLUMNS) + 1)
-        header_cols[0].markdown("**Focus**")
-        for col_idx, col_name in enumerate(PREVIEW_COLUMNS):
-            header_cols[col_idx + 1].markdown(f"**{col_name.replace('_', ' ').title()}**")
-
-        for row_idx, row in enumerate(preview_rows):
-            row_cols = st.columns(len(PREVIEW_COLUMNS) + 1)
-            row_cols[0].checkbox("", key=focus_keys[row_idx])
-            for col_idx, col_name in enumerate(PREVIEW_COLUMNS):
-                value = row.get(col_name)
-                row_cols[col_idx + 1].write(value if value not in (None, "") else "—")
+        preview_df = pd.DataFrame(preview_rows)
+        preview_df.insert(0, "Focus", focus_mask)
+        edited_df = st.data_editor(
+            preview_df,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Focus": st.column_config.CheckboxColumn(
+                    "Focus",
+                    help="Behaves like a radio button: only one selection is used.",
+                    default=False,
+                )
+            },
+            key="preview_table",
+        )
+        edited_df = pd.DataFrame(edited_df)
+        new_mask = [bool(flag) for flag in edited_df["Focus"]]
+        changed = [idx for idx, (nval, oval) in enumerate(zip(new_mask, focus_mask)) if nval != oval]
+        if changed:
+            candidate = changed[-1]
+            selected_index = candidate if new_mask[candidate] else None
+        elif any(new_mask):
+            selected_index = next((idx for idx, flag in enumerate(new_mask) if flag), None)
+        else:
+            selected_index = None
 
         if selected_index is not None and 0 <= selected_index < len(all_rows):
+            focus_mask = [idx == selected_index for idx in range(len(new_mask))]
             chart_rows = [all_rows[selected_index]]
             selected_title = all_rows[selected_index].get("title") or all_rows[selected_index].get("display_name")
         else:
+            focus_mask = [False] * len(new_mask)
             chart_rows = all_rows
+            selected_index = None
             selected_title = None
 
-        st.caption("Click the Focus circle to inspect SDGs for a single publication; click again to reset.")
+        st.session_state["preview_focus_index"] = selected_index
+        st.session_state["preview_focus_mask"] = focus_mask
+        st.caption("Click the Focus column to inspect SDGs for a single publication (unselect for all).")
     else:
         st.info("No preview rows available.")
 
