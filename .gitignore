@@ -1,8 +1,39 @@
-__pycache__/
-*.pyc
+# --- General OS/Editor ---
 .DS_Store
-*.sqlite3
-*.sqlite3-wal
-*.sqlite3-shm
-.streamlit/secrets.toml
+Thumbs.db
 *.log
+.idea/
+.vscode/
+.envrc
+
+# --- Python build artifacts ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+eggs/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+.cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Streamlit secrets ---
+.streamlit/secrets.toml
+
+# --- Local data/cache ---
+cache.sqlite3*
+
+# --- Misc ---
+*.swp
+*.swo
+*.bak
