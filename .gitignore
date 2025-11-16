@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
-cache.sqlite3
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 .streamlit/secrets.toml
 *.log
