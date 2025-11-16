@@ -435,10 +435,10 @@ def render_publication_type_selector() -> Optional[str]:
 
 def render_model_selector() -> str:
     st.subheader("3. SDG classifier", divider="green")
-    labels = [f"{name} — {desc}" for name, desc in AURORA_MODELS]
+    desc_only = [desc for _, desc in AURORA_MODELS]
     default_index = next((i for i, (name, _) in enumerate(AURORA_MODELS) if name == "aurora-sdg-multi"), 0)
-    selection = st.selectbox("Choose a model", labels, index=default_index)
-    return AURORA_MODELS[labels.index(selection)][0]
+    selection = st.selectbox("Choose a model", desc_only, index=default_index)
+    return AURORA_MODELS[desc_only.index(selection)][0]
 
 
 def render_advanced_options(
@@ -486,9 +486,7 @@ def render_advanced_options(
         step=50,
         help="Use to test the workflow without downloading everything.",
     )
-    if semantic_key_from_secret:
-        st.caption("Semantic Scholar API key loaded from secrets.toml.")
-    else:
+    if not semantic_key_from_secret:
         st.info(
             "Add `semantic_scholar_api_key` to .streamlit/secrets.toml to fetch abstracts "
             "from Semantic Scholar when OpenAlex lacks them."
@@ -637,6 +635,7 @@ def main():
     chart_rows: List[Dict[str, Any]] = all_rows
     selected_title: Optional[str] = None
     if total_rows > 0:
+        st.write("")  # spacing
         st.subheader("Preview", divider="orange")
         st.markdown(RADIO_CHECKBOX_CSS, unsafe_allow_html=True)
         total_pages = max(1, math.ceil(total_rows / PREVIEW_PAGE_SIZE))
@@ -674,25 +673,33 @@ def main():
         preview_df.insert(0, "#", range(start_index + 1, start_index + 1 + len(preview_df)))
         rows_in_page = len(preview_df)
         table_height = 980 if rows_in_page >= PREVIEW_PAGE_SIZE else max(200, rows_in_page * 35 + 120)
+        column_configs = {}
+        for column in preview_df.columns:
+            if column == "#":
+                column_configs[column] = st.column_config.NumberColumn(
+                    "#", help="Row number in this page", width="small"
+                )
+            elif column == "openalex_id":
+                column_configs[column] = st.column_config.LinkColumn(
+                    "OpenAlex ID",
+                    help="Open the work in OpenAlex",
+                    display_text=r"(?:https?://openalex\.org/)?(.+)",
+                )
+            elif column.lower() == "doi":
+                column_configs[column] = st.column_config.LinkColumn(
+                    "DOI",
+                    help="Open this DOI in a new tab",
+                    display_text=r"(?:https?://(?:dx\.)?doi\.org/)?(.+)",
+                )
+            else:
+                column_configs[column] = st.column_config.TextColumn(column.replace("_", " ").title())
         st.data_editor(
             preview_df,
             hide_index=True,
             disabled=True,
             height=table_height,
             width="stretch",
-            column_config={
-                "#": st.column_config.NumberColumn("#", help="Row number in this page"),
-                "openalex_id": st.column_config.LinkColumn(
-                    "OpenAlex ID",
-                    help="Open the work in OpenAlex",
-                    display_text=r"(?:https?://openalex\.org/)?(.+)",
-                ),
-                "doi": st.column_config.LinkColumn(
-                    "DOI",
-                    help="Open this DOI in a new tab",
-                    display_text=r"(?:https?://(?:dx\.)?doi\.org/)?(.+)",
-                ),
-            },
+            column_config=column_configs,
         )
         st.caption(f"Showing page {current_page} of {total_pages}.")
         dropdown_options = ["0 — All publications"]
@@ -717,7 +724,13 @@ def main():
 
         if selected_index is not None and 0 <= selected_index < len(all_rows):
             chart_rows = [all_rows[selected_index]]
-            selected_title = all_rows[selected_index].get("title") or all_rows[selected_index].get("display_name")
+            row_info = all_rows[selected_index]
+            author_info = abbreviate_authors(row_info.get("authors") or "")
+            title_info = row_info.get("title") or row_info.get("display_name") or "(no title)"
+            if author_info:
+                selected_title = f"{author_info}, {title_info}"
+            else:
+                selected_title = title_info
         else:
             chart_rows = all_rows
             selected_index = None
@@ -728,12 +741,14 @@ def main():
         st.info("No preview rows available.")
 
     chart_data = aggregate_sdg_counts(chart_rows)
+    st.write("")
     st.subheader("SDG distribution", divider="red")
     chart_title = "selected publication" if len(chart_rows) == 1 else "all publications"
     if chart_title == "selected publication" and selected_title:
-        chart_title = f"selected publication '{selected_title}'"
+        chart_title = f"selected publication ({selected_title})"
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
 
+    st.write("")
     st.subheader("Download data sets", divider="gray")
     export_rows = rows or all_rows
     excel_bytes = rows_to_excel_bytes(export_rows, CSV_FIELDNAMES) if export_rows else None
