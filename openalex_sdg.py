@@ -7,9 +7,16 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import requests
+
+from cache_db import (
+    get_cached_sdg_result,
+    get_cached_work,
+    upsert_sdg_result,
+    upsert_work,
+)
 
 # ------------------ CONFIG ------------------
 BASE_WORKS = "https://api.openalex.org/works"
@@ -316,7 +323,7 @@ def fetch_works_with_sdg(
         openalex_abstract_missing=0,
         ss_abstract_retrieved=0,
     )
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
 
     def emit_progress(message: str = "") -> None:
         if progress_callback:
@@ -351,11 +358,16 @@ def fetch_works_with_sdg(
             authorships = work.get("authorships") or []
             authors_str, insts_str = flatten_authors_and_institutions(authorships)
 
+            cached_work = get_cached_work(openalex_id) if openalex_id else None
+
             abstract_text = reconstruct_abstract(work.get("abstract_inverted_index"))
 
             if not abstract_text:
                 stats.openalex_abstract_missing += 1
-                if doi:
+                cached_abstract = (cached_work or {}).get("abstract") or ""
+                if cached_abstract:
+                    abstract_text = cached_abstract
+                elif doi:
                     ss_abstract = get_abstract_from_semantic_scholar(
                         doi, session=session, api_key=semantic_scholar_api_key
                     )
@@ -367,6 +379,8 @@ def fetch_works_with_sdg(
             sdg_json: Optional[dict] = None
             sdg_note = ""
             sdg_formatted = ""
+            cached_sdg_entry: Optional[Dict[str, Any]] = None
+            reused_sdg = False
 
             if model == "skip":
                 sdg_note = "skipped: user selected 'skip'"
@@ -374,39 +388,67 @@ def fetch_works_with_sdg(
                 if model == "osdg" and too_short_for_model(model, text_for_sdg):
                     sdg_note = "skipped: osdg requires >=50 words"
                 else:
-                    sdg_json, sdg_note = classify_text_aurora(
-                        model, text_for_sdg, session=session, user_agent=user_agent
+                    cached_sdg_entry = (
+                        get_cached_sdg_result(openalex_id, model) if openalex_id else None
                     )
-                    sdg_formatted = (
-                        format_sdg_predictions(sdg_json) if sdg_json is not None else ""
-                    )
-                    time.sleep(0.12)
+                    if cached_sdg_entry:
+                        reused_sdg = True
+                        raw_json = cached_sdg_entry.get("sdg_response") or ""
+                        if raw_json:
+                            try:
+                                sdg_json = json.loads(raw_json)
+                            except json.JSONDecodeError:
+                                sdg_json = None
+                        sdg_formatted = cached_sdg_entry.get("sdg_formatted") or ""
+                        sdg_note = cached_sdg_entry.get("sdg_note") or ""
+                        if not sdg_formatted and sdg_json:
+                            sdg_formatted = format_sdg_predictions(sdg_json)
+                    else:
+                        sdg_json, sdg_note = classify_text_aurora(
+                            model, text_for_sdg, session=session, user_agent=user_agent
+                        )
+                        sdg_formatted = (
+                            format_sdg_predictions(sdg_json) if sdg_json is not None else ""
+                        )
+                        upsert_sdg_result(
+                            openalex_id=openalex_id,
+                            model=model,
+                            sdg_response=sdg_json,
+                            sdg_formatted=sdg_formatted,
+                            sdg_note=sdg_note,
+                        )
+                        time.sleep(0.12)
 
             sdg_raw_str = (
                 json.dumps(sdg_json, ensure_ascii=False) if sdg_json is not None else ""
             )
+            if reused_sdg and not sdg_raw_str and cached_sdg_entry:
+                sdg_raw_str = cached_sdg_entry.get("sdg_response") or ""
 
-            rows.append(
-                {
-                    "openalex_id": openalex_id,
-                    "title": title,
-                    "publication_date": publication_date,
-                    "doi": doi,
-                    "type": work_type_val,
-                    "language": language,
-                    "is_oa": is_oa,
-                    "oa_status": oa_status,
-                    "authors": authors_str,
-                    "institutions": insts_str,
-                    "abstract": abstract_text,
-                    "sdg_model": model,
-                    "sdg_response": sdg_raw_str,
-                    "sdg_formatted": sdg_formatted,
-                    "sdg_note": sdg_note,
-                }
-            )
+            row_data = {
+                "openalex_id": openalex_id,
+                "title": title,
+                "publication_date": publication_date,
+                "doi": doi,
+                "type": work_type_val,
+                "language": language,
+                "is_oa": is_oa,
+                "oa_status": oa_status,
+                "authors": authors_str,
+                "institutions": insts_str,
+                "abstract": abstract_text,
+                "sdg_model": model,
+                "sdg_response": sdg_raw_str,
+                "sdg_formatted": sdg_formatted,
+                "sdg_note": sdg_note,
+            }
+            rows.append(row_data)
             stats.total_processed += 1
-            emit_progress(f"Processed {title[:64] or openalex_id}")
+            upsert_work(row_data, raw_record=work)
+            label = f"Processed {title[:64] or openalex_id}"
+            if reused_sdg:
+                label += " (cached SDG)"
+            emit_progress(label)
 
         for work in results:
             if limit_rows is not None and stats.total_processed >= limit_rows:

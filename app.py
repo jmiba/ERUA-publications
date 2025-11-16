@@ -220,7 +220,8 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
     search_query = st.text_input(
         "Search by institution name first", placeholder="Europa-Universität Viadrina"
     )
-    search_results: Optional[List[dict]] = None
+    search_results: Optional[List[dict]] = st.session_state.get("institution_search_results")
+    search_ran = st.session_state.get("institution_search_ran", False)
     if st.button("Search ROR registry"):
         if not search_query.strip():
             st.warning("Please provide a search query.")
@@ -234,23 +235,27 @@ def render_institution_selector(user_agent: str) -> Optional[str]:
                 except requests.RequestException as exc:
                     st.error(f"ROR search error: {exc}")
                     search_results = []
-            if search_results:
-                options = {
-                    f"{item.get('display_name', '—')} ({(item.get('country_code') or '').upper()}) — {item.get('ror', '—')}":
-                    item.get("ror")
-                    for item in search_results
-                }
-                choice = st.radio(
-                    "Matches",
-                    options=list(options.keys()),
-                    key="institution_choice",
-                )
-                selected = options.get(choice)
-                if selected:
-                    st.session_state["selected_ror"] = selected
-                    return selected
-            else:
-                st.info("No matches found.")
+            st.session_state["institution_search_results"] = search_results or []
+            st.session_state["institution_search_ran"] = True
+    search_results = st.session_state.get("institution_search_results")
+    search_ran = st.session_state.get("institution_search_ran", False)
+    if search_results:
+        options = {
+            f"{item.get('display_name', '—')} ({(item.get('country_code') or '').upper()}) — {item.get('ror', '—')}":
+            item.get("ror")
+            for item in search_results
+        }
+        choice = st.radio(
+            "Matches",
+            options=list(options.keys()),
+            key="institution_choice",
+        )
+        selected = options.get(choice)
+        if selected:
+            st.session_state["selected_ror"] = selected
+            return selected
+    elif search_ran:
+        st.info("No matches found.")
 
     ror_input = st.text_input(
         "…or enter a ROR URL directly (e.g., https://ror.org/02msan859)",

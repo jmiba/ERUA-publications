@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+cache.sqlite3
+.streamlit/secrets.toml
+*.log
