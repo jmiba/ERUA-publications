@@ -17,6 +17,7 @@ import tomllib
 from openalex_sdg import (
     AURORA_MODELS,
     DEFAULT_USER_AGENT,
+    FetchCancelled,
     FetchStats,
     fetch_works_with_sdg,
     is_ror_url,
@@ -769,9 +770,22 @@ def main():
         "limit": limit_rows,
     }
     result_payload = st.session_state.get(RESULT_SESSION_KEY)
+    st.session_state.setdefault("fetch_cancel_requested", False)
+    st.session_state.setdefault("fetch_in_progress", False)
+    cancel_container = st.empty()
+    if st.session_state.get("fetch_in_progress"):
+        if cancel_container.button("Cancel fetch", type="secondary"):
+            st.session_state["fetch_cancel_requested"] = True
+            st.toast("Cancelling fetch…", icon="⏹️")
 
     run_button = st.button("Fetch works and build CSV", type="primary")
     if run_button:
+        st.session_state["fetch_cancel_requested"] = False
+        st.session_state["fetch_in_progress"] = True
+        cancel_container.empty()
+        cancel_container = st.empty()
+        if cancel_container.button("Cancel fetch", type="secondary"):
+            st.session_state["fetch_cancel_requested"] = True
         progress_bar = st.progress(0)
         progress_text = st.empty()
 
@@ -798,6 +812,9 @@ def main():
             limit_rows,
         )
 
+        def cancel_check() -> bool:
+            return bool(st.session_state.get("fetch_cancel_requested"))
+
         with st.spinner("Contacting OpenAlex and Aurora APIs…"):
             try:
                 rows, stats = fetch_works_with_sdg(
@@ -810,20 +827,38 @@ def main():
                     user_agent=user_agent.strip() or DEFAULT_USER_AGENT,
                     semantic_scholar_api_key=semantic_scholar_key,
                     progress_callback=progress_callback,
+                    cancel_check=cancel_check,
                 )
+            except FetchCancelled:
+                progress_bar.empty()
+                progress_text.empty()
+                st.session_state["fetch_in_progress"] = False
+                st.session_state["fetch_cancel_requested"] = False
+                cancel_container.empty()
+                st.info("Fetch cancelled.", icon="⏹️")
+                return
             except requests.HTTPError as exc:
                 progress_bar.empty()
                 progress_text.empty()
+                st.session_state["fetch_in_progress"] = False
+                st.session_state["fetch_cancel_requested"] = False
+                cancel_container.empty()
                 st.error(f"Request failed: {exc}")
                 return
             except requests.RequestException as exc:
                 progress_bar.empty()
                 progress_text.empty()
+                st.session_state["fetch_in_progress"] = False
+                st.session_state["fetch_cancel_requested"] = False
+                cancel_container.empty()
                 st.error(f"Network error: {exc}")
                 return
 
         progress_bar.empty()
         progress_text.empty()
+        st.session_state["fetch_in_progress"] = False
+        st.session_state["fetch_cancel_requested"] = False
+        cancel_container.empty()
         csv_bytes = rows_to_csv_bytes(rows)
         result_payload = {
             "csv_bytes": csv_bytes,
@@ -847,7 +882,8 @@ def main():
     st.success(
         f"Wrote {stats.total_processed:,} rows. "
         f"OpenAlex missing abstracts: {stats.openalex_abstract_missing:,}; "
-        f"retrieved from Semantic Scholar: {stats.ss_abstract_retrieved:,}."
+        f"retrieved from Semantic Scholar: {stats.ss_abstract_retrieved:,}; "
+        f"retrieved from Google Scholar: {stats.gs_abstract_retrieved:,}."
     )
     if rows is None:
         try:

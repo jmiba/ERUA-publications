@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from html import unescape
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
+
+try:  # pragma: no cover - optional dependency
+    from scholarly import scholarly  # type: ignore
+except Exception:  # pragma: no cover - no scholarly installed / available
+    scholarly = None
 
 from cache_db import (
     get_cached_sdg_result,
@@ -23,6 +30,7 @@ BASE_WORKS = "https://api.openalex.org/works"
 BASE_INSTITUTIONS = "https://api.openalex.org/institutions"
 AURORA_BASE = "https://aurora-sdg.labs.vu.nl/classifier/classify"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
+SCHOLAR_MAX_RESULTS = 5
 
 PER_PAGE = 200  # OpenAlex max
 DEFAULT_FROM_DATE = "2023-01-01"
@@ -37,9 +45,16 @@ AURORA_MODELS = [
 ]
 
 MIN_WORDS_BY_MODEL = {"osdg": 50}
+HTML_TAG_RE = re.compile(r"<[^>]+>")
 # --------------------------------------------
 
 ProgressHook = Optional[Callable[[int, Optional[int], str], None]]
+
+
+class FetchCancelled(Exception):
+    """Raised when the fetch loop is cancelled by the user."""
+
+    pass
 
 
 @dataclass
@@ -48,6 +63,7 @@ class FetchStats:
     total_processed: int
     openalex_abstract_missing: int
     ss_abstract_retrieved: int
+    gs_abstract_retrieved: int
 
 
 def too_short_for_model(model: str, text: str) -> bool:
@@ -112,6 +128,95 @@ def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, 
             seen.add(name)
             inst_names.append(name)
     return "; ".join(author_names), "; ".join(inst_names)
+
+
+def clean_html_fragment(text: str) -> str:
+    if not text:
+        return ""
+    decoded = unescape(text)
+    without_tags = HTML_TAG_RE.sub(" ", decoded)
+    normalized = re.sub(r"\s+", " ", without_tags)
+    return normalized.strip()
+
+
+def _normalize_text_for_match(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^\w\s]", " ", text).lower()
+    return re.sub(r"\s+", "", text).strip()
+
+
+def _normalize_author_token(name: str) -> str:
+    if not name:
+        return ""
+    clean = unicodedata.normalize("NFKD", name)
+    clean = "".join(ch for ch in clean if not unicodedata.combining(ch))
+    has_comma = "," in clean
+    clean = re.sub(r"[^\w\s]", " ", clean).lower()
+    parts = clean.split()
+    if not parts:
+        return ""
+    return parts[0] if has_comma else parts[-1]
+
+
+def _author_tokens_from_string(authors: str) -> Set[str]:
+    tokens: Set[str] = set()
+    if not authors:
+        return tokens
+    for raw in authors.split(";"):
+        token = _normalize_author_token(raw.strip())
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def get_abstract_from_google_scholar(title: str, authors: str) -> Optional[str]:
+    if scholarly is None or not title:
+        return None
+    normalized_target = _normalize_text_for_match(title)
+    if not normalized_target:
+        return None
+    target_authors = _author_tokens_from_string(authors)
+    try:
+        search_iter = scholarly.search_pubs(title)
+    except Exception as exc:  # pragma: no cover - network / import dependent
+        logging.warning("Google Scholar search failed for title '%s': %s", title, exc)
+        return None
+
+    checked = 0
+    while checked < SCHOLAR_MAX_RESULTS:
+        try:
+            result = next(search_iter)
+        except StopIteration:
+            break
+        except Exception as exc:  # pragma: no cover - iteration failure
+            logging.warning("Google Scholar iteration failed for '%s': %s", title, exc)
+            break
+        checked += 1
+        bib = result.get("bib") if isinstance(result, dict) else {}
+        candidate_title = (bib or {}).get("title") or ""
+        if not candidate_title:
+            continue
+        normalized_candidate = _normalize_text_for_match(candidate_title)
+        if normalized_candidate != normalized_target:
+            continue
+        candidate_authors = (bib or {}).get("author") or []
+        if target_authors and candidate_authors:
+            norm_candidates = {_normalize_author_token(name) for name in candidate_authors if name}
+            if not norm_candidates & target_authors:
+                continue
+        try:
+            filled = scholarly.fill(result)  # type: ignore[arg-type]
+        except Exception as exc:  # pragma: no cover - network heavy
+            logging.debug("Google Scholar fill failed for '%s': %s", title, exc)
+            filled = result
+        bib_data = filled.get("bib") if isinstance(filled, dict) else bib
+        abstract = (bib_data or {}).get("abstract") or (bib or {}).get("abstract")
+        if abstract:
+            return abstract.strip()
+    return None
 
 
 def abbreviate_authors(value: str) -> str:
@@ -319,6 +424,7 @@ def fetch_works_with_sdg(
     user_agent: str = DEFAULT_USER_AGENT,
     semantic_scholar_api_key: Optional[str] = None,
     progress_callback: ProgressHook = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
     params = {
         "filter": make_filter(ror_url, from_date, work_type, to_date),
@@ -333,10 +439,16 @@ def fetch_works_with_sdg(
         total_processed=0,
         openalex_abstract_missing=0,
         ss_abstract_retrieved=0,
+        gs_abstract_retrieved=0,
     )
     rows: List[Dict[str, Any]] = []
 
+    def _ensure_not_cancelled() -> None:
+        if cancel_check and cancel_check():
+            raise FetchCancelled()
+
     def emit_progress(message: str = "") -> None:
+        _ensure_not_cancelled()
         if progress_callback:
             progress_callback(stats.total_processed, stats.total_expected, message)
 
@@ -357,6 +469,7 @@ def fetch_works_with_sdg(
 
         def process_record(work: dict) -> None:
             nonlocal session
+            _ensure_not_cancelled()
             openalex_id = work.get("id", "")
             title = work.get("display_name") or work.get("title") or ""
             publication_date = work.get("publication_date") or ""
@@ -370,12 +483,13 @@ def fetch_works_with_sdg(
             authors_str, insts_str = flatten_authors_and_institutions(authorships)
 
             cached_work = get_cached_work(openalex_id) if openalex_id else None
+            cached_abstract = (cached_work or {}).get("abstract") or ""
 
             abstract_text = reconstruct_abstract(work.get("abstract_inverted_index"))
+            abstract_updated = False
 
             if not abstract_text:
                 stats.openalex_abstract_missing += 1
-                cached_abstract = (cached_work or {}).get("abstract") or ""
                 if cached_abstract:
                     abstract_text = cached_abstract
                 elif doi:
@@ -385,6 +499,14 @@ def fetch_works_with_sdg(
                     if ss_abstract:
                         abstract_text = ss_abstract
                         stats.ss_abstract_retrieved += 1
+            if not abstract_text:
+                scholar_abstract = get_abstract_from_google_scholar(title, authors_str)
+                if scholar_abstract:
+                    abstract_text = scholar_abstract
+                    stats.gs_abstract_retrieved += 1
+            clean_cached_abs = clean_html_fragment(cached_abstract)
+            abstract_text = clean_html_fragment(abstract_text)
+            abstract_updated = bool(abstract_text and abstract_text != clean_cached_abs)
 
             text_for_sdg = abstract_text if abstract_text else title
             sdg_json: Optional[dict] = None
@@ -402,7 +524,8 @@ def fetch_works_with_sdg(
                     cached_sdg_entry = (
                         get_cached_sdg_result(openalex_id, model) if openalex_id else None
                     )
-                    if cached_sdg_entry:
+                    should_reuse_sdg = bool(cached_sdg_entry) and not abstract_updated
+                    if should_reuse_sdg:
                         reused_sdg = True
                         raw_json = cached_sdg_entry.get("sdg_response") or ""
                         if raw_json:
@@ -467,6 +590,7 @@ def fetch_works_with_sdg(
             emit_progress(label)
 
         for work in results:
+            _ensure_not_cancelled()
             if limit_rows is not None and stats.total_processed >= limit_rows:
                 next_cursor = None
                 break
@@ -475,6 +599,7 @@ def fetch_works_with_sdg(
         params["cursor"] = next_cursor
 
         while next_cursor:
+            _ensure_not_cancelled()
             if limit_rows is not None and stats.total_processed >= limit_rows:
                 break
             response = session.get(BASE_WORKS, params=params, headers=headers, timeout=60)
@@ -498,6 +623,7 @@ __all__ = [
     "AURORA_MODELS",
     "DEFAULT_FROM_DATE",
     "DEFAULT_USER_AGENT",
+    "FetchCancelled",
     "FetchStats",
     "SEMANTIC_SCHOLAR_API",
     "fetch_works_with_sdg",
