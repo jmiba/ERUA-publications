@@ -213,6 +213,99 @@ def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
     st.altair_chart(chart, use_container_width=True)
 
 
+def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
+    st.subheader("Publication volume by OA status", divider="blue")
+    if not rows:
+        st.info("No publications available in the selected time frame.")
+        return
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No publications available in the selected time frame.")
+        return
+
+    start_month = pd.to_datetime(start_date, errors="coerce")
+    end_month = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_month) or pd.isna(end_month):
+        st.info("Unable to determine the selected time frame.")
+        return
+    start_month = start_month.to_period("M").to_timestamp()
+    end_month = end_month.to_period("M").to_timestamp()
+    if start_month > end_month:
+        start_month, end_month = end_month, start_month
+
+    if "publication_date" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+    else:
+        df["pub_date"] = pd.NaT
+    if df["pub_date"].isna().all() and "publication_year" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_year"].astype(str), format="%Y", errors="coerce")
+    df = df.dropna(subset=["pub_date"])
+    if df.empty:
+        st.info("No publications have a valid publication date for this time frame.")
+        return
+
+    df["pub_month"] = df["pub_date"].dt.to_period("M").dt.to_timestamp()
+    df = df[(df["pub_month"] >= start_month) & (df["pub_month"] <= end_month)]
+    if df.empty:
+        st.info("No publications fall within the selected publication period.")
+        return
+    if "oa_status" not in df.columns:
+        df["oa_status"] = "unknown"
+    else:
+        df["oa_status"] = df["oa_status"].fillna("unknown")
+        df.loc[df["oa_status"].astype(str).str.strip() == "", "oa_status"] = "unknown"
+
+    grouped = (
+        df.groupby(["pub_month", "oa_status"], dropna=False)
+        .size()
+        .reset_index(name="count")
+    )
+    if grouped.empty:
+        st.info("No publications fall within the selected publication period.")
+        return
+
+    month_range = pd.date_range(start=start_month, end=end_month, freq="MS")
+    status_values = sorted(grouped["oa_status"].unique())
+    scaffold = (
+        pd.DataFrame({"pub_month": month_range})
+        .assign(key=1)
+        .merge(pd.DataFrame({"oa_status": status_values, "key": 1}), on="key")
+        .drop(columns="key")
+    )
+    chart_df = scaffold.merge(grouped, on=["pub_month", "oa_status"], how="left").fillna({"count": 0})
+    chart_df["count"] = chart_df["count"].astype(int)
+    oa_order = ["diamond", "gold", "hybrid", "green", "bronze", "closed"]
+    ordered_statuses = [
+        *[status for status in oa_order if status in status_values],
+        *[status for status in status_values if status not in oa_order],
+    ]
+
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("yearmonth(pub_month):T", title="Publication month"),
+            y=alt.Y("count:Q", stack="zero", title="Publications"),
+            color=alt.Color(
+                "oa_status:N",
+                title="Open-Access status",
+                scale=alt.Scale(domain=ordered_statuses),
+            ),
+            tooltip=[
+                alt.Tooltip("yearmonth(pub_month):T", title="Month"),
+                alt.Tooltip("oa_status:N", title="OA status"),
+                alt.Tooltip("count:Q", title="Publications"),
+            ],
+        )
+        .properties(
+            width=1650,
+            height=400,
+            title=f"Publications from {start_month:%b %Y} to {end_month:%b %Y}",
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def build_output_filename(
     ror_url: str,
     wtype: Optional[str],
@@ -739,6 +832,9 @@ def main():
     else:
         st.session_state["preview_page"] = 1
         st.info("No preview rows available.")
+
+    st.write("")
+    render_oa_status_chart(all_rows, from_date_str, to_date_str)
 
     chart_data = aggregate_sdg_counts(chart_rows)
     st.write("")
