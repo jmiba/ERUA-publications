@@ -57,6 +57,15 @@ CSV_FIELDNAMES = [
 ]
 RESULT_SESSION_KEY = "fetch_result"
 SDG_THRESHOLD_PERCENT = 3.0
+OA_STATUS_ORDER = ["diamond", "gold", "hybrid", "green", "bronze", "closed"]
+OA_STATUS_COLORS = {
+    "diamond": "#7dd3fc",
+    "gold": "#facc15",
+    "hybrid": "#efa046",
+    "green": "#22c55e",
+    "bronze": "#cd7f32",
+    "closed": "#6b7280",
+}
 RADIO_CHECKBOX_CSS = """
 <style>
 div[data-testid="stDataFrame"] div[role="checkbox"] input[type="checkbox"] {
@@ -274,23 +283,26 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
     )
     chart_df = scaffold.merge(grouped, on=["pub_month", "oa_status"], how="left").fillna({"count": 0})
     chart_df["count"] = chart_df["count"].astype(int)
-    oa_order = ["diamond", "gold", "hybrid", "green", "bronze", "closed"]
     ordered_statuses = [
-        *[status for status in oa_order if status in status_values],
-        *[status for status in status_values if status not in oa_order],
+        *[status for status in OA_STATUS_ORDER if status in status_values],
+        *[status for status in status_values if status not in OA_STATUS_ORDER],
     ]
+    order_mapping = {status: idx for idx, status in enumerate(ordered_statuses)}
+    chart_df["status_order"] = chart_df["oa_status"].map(order_mapping).fillna(len(order_mapping)).astype(int)
+    color_range = [OA_STATUS_COLORS.get(status, "#94a3b8") for status in ordered_statuses]
 
     chart = (
         alt.Chart(chart_df)
         .mark_bar()
         .encode(
             x=alt.X("yearmonth(pub_month):T", title="Publication month"),
-            y=alt.Y("count:Q", stack="zero", title="Publications"),
+            y=alt.Y("count:Q", stack="zero", title="Publications", axis=alt.Axis(format="d")),
             color=alt.Color(
                 "oa_status:N",
                 title="Open-Access status",
-                scale=alt.Scale(domain=ordered_statuses),
+                scale=alt.Scale(domain=ordered_statuses, range=color_range),
             ),
+            order=alt.Order("status_order:Q", sort="descending"),
             tooltip=[
                 alt.Tooltip("yearmonth(pub_month):T", title="Month"),
                 alt.Tooltip("oa_status:N", title="OA status"),
@@ -304,6 +316,126 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
         )
     )
     st.altair_chart(chart, use_container_width=True)
+
+
+def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20):
+    st.subheader("OA distribution by author", divider="green")
+    if not rows:
+        st.info("No publications available to display per-author OA status.")
+        return
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No publications available to display per-author OA status.")
+        return
+
+    start_month = pd.to_datetime(start_date, errors="coerce")
+    end_month = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_month) or pd.isna(end_month):
+        st.info("Unable to determine the selected time frame for author distribution.")
+        return
+    start_month = start_month.to_period("M").to_timestamp()
+    end_month = end_month.to_period("M").to_timestamp()
+    if start_month > end_month:
+        start_month, end_month = end_month, start_month
+
+    if "publication_date" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+    else:
+        df["pub_date"] = pd.NaT
+    if df["pub_date"].isna().all() and "publication_year" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_year"].astype(str), format="%Y", errors="coerce")
+    df = df.dropna(subset=["pub_date"])
+    if df.empty:
+        st.info("No publications have a valid publication date for this time frame.")
+        return
+    df["pub_month"] = df["pub_date"].dt.to_period("M").dt.to_timestamp()
+    df = df[(df["pub_month"] >= start_month) & (df["pub_month"] <= end_month)]
+    if df.empty:
+        st.info("No publications fall within the selected publication period.")
+        return
+
+    if "authors" not in df.columns:
+        st.info("No author information available in these records.")
+        return
+    df["authors"] = df["authors"].fillna("").astype(str)
+    author_df = df.assign(author=df["authors"].str.split(";")).explode("author")
+    author_df["author"] = author_df["author"].astype(str).str.strip()
+    author_df = author_df[author_df["author"] != ""]
+    if author_df.empty:
+        st.info("No author names available to build the OA distribution.")
+        return
+
+    if "oa_status" not in author_df.columns:
+        author_df["oa_status"] = "unknown"
+    else:
+        author_df["oa_status"] = author_df["oa_status"].fillna("unknown")
+        author_df.loc[author_df["oa_status"].astype(str).str.strip() == "", "oa_status"] = "unknown"
+
+    grouped = (
+        author_df.groupby(["author", "oa_status"], dropna=False)
+        .size()
+        .reset_index(name="count")
+    )
+    if grouped.empty:
+        st.info("No author data available to render OA status distribution.")
+        return
+
+    totals = (
+        grouped.groupby("author", as_index=False)["count"]
+        .sum()
+        .sort_values("count", ascending=False)
+    )
+    top_authors = totals.head(max_authors)
+    if top_authors.empty:
+        st.info("No authors qualify for the OA distribution chart.")
+        return
+    chart_df = grouped.merge(
+        top_authors.rename(columns={"count": "total"}),
+        on="author",
+        how="inner",
+    )
+    chart_df = chart_df.sort_values(["total", "author"], ascending=[False, True])
+    author_order = top_authors["author"].tolist()
+    status_values = sorted(chart_df["oa_status"].unique())
+    ordered_statuses = [
+        *[status for status in OA_STATUS_ORDER if status in status_values],
+        *[status for status in status_values if status not in OA_STATUS_ORDER],
+    ]
+    order_mapping = {status: idx for idx, status in enumerate(ordered_statuses)}
+    chart_df["status_order"] = chart_df["oa_status"].map(order_mapping).fillna(len(order_mapping)).astype(int)
+    color_range = [OA_STATUS_COLORS.get(status, "#94a3b8") for status in ordered_statuses]
+
+    base_height = 40 * max(1, len(author_order))
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("count:Q", title="Publications", axis=alt.Axis(format="d")),
+            y=alt.Y(
+                "author:N",
+                title="Author",
+                sort=author_order[::-1],
+            ),
+            color=alt.Color(
+                "oa_status:N",
+                title="Open-Access status",
+                scale=alt.Scale(domain=ordered_statuses, range=color_range),
+            ),
+            order=alt.Order("status_order:Q", sort="descending"),
+            tooltip=[
+                alt.Tooltip("author:N", title="Author"),
+                alt.Tooltip("oa_status:N", title="OA status"),
+                alt.Tooltip("count:Q", title="Publications"),
+            ],
+        )
+        .properties(
+            width=1650,
+            height=max(300, base_height),
+            title=f"OA status distribution for top {len(author_order)} authors",
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption("Authors ranked by number of publications in the selected period.")
 
 
 def build_output_filename(
@@ -833,9 +965,6 @@ def main():
         st.session_state["preview_page"] = 1
         st.info("No preview rows available.")
 
-    st.write("")
-    render_oa_status_chart(all_rows, from_date_str, to_date_str)
-
     chart_data = aggregate_sdg_counts(chart_rows)
     st.write("")
     st.subheader("SDG distribution", divider="red")
@@ -843,6 +972,10 @@ def main():
     if chart_title == "selected publication" and selected_title:
         chart_title = f"selected publication ({selected_title})"
     render_sdg_pie_chart(chart_data, f"SDGs in {chart_title}")
+    st.write("")
+    render_author_oa_chart(all_rows, from_date_str, to_date_str)
+    st.write("")
+    render_oa_status_chart(all_rows, from_date_str, to_date_str)
 
     st.write("")
     st.subheader("Download data sets", divider="gray")
