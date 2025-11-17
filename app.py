@@ -319,6 +319,85 @@ def render_oa_status_chart(rows: List[Dict[str, Any]], start_date: str, end_date
     st.altair_chart(chart, use_container_width=True)
 
 
+def render_publication_type_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str):
+    st.subheader("Publication types in selected period", divider="green")
+    if not rows:
+        st.info("No publications available to display publication types.")
+        return
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("No publications available to display publication types.")
+        return
+
+    start_month = pd.to_datetime(start_date, errors="coerce")
+    end_month = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(start_month) or pd.isna(end_month):
+        st.info("Unable to determine the selected time frame to calculate publication types.")
+        return
+    start_month = start_month.to_period("M").to_timestamp()
+    end_month = end_month.to_period("M").to_timestamp()
+    if start_month > end_month:
+        start_month, end_month = end_month, start_month
+
+    if "publication_date" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_date"], errors="coerce")
+    else:
+        df["pub_date"] = pd.NaT
+    if df["pub_date"].isna().all() and "publication_year" in df.columns:
+        df["pub_date"] = pd.to_datetime(df["publication_year"].astype(str), format="%Y", errors="coerce")
+    df = df.dropna(subset=["pub_date"])
+    if df.empty:
+        st.info("No publications have a valid publication date for this time frame.")
+        return
+
+    df["pub_month"] = df["pub_date"].dt.to_period("M").dt.to_timestamp()
+    df = df[(df["pub_month"] >= start_month) & (df["pub_month"] <= end_month)]
+    if df.empty:
+        st.info("No publications fall within the selected publication period.")
+        return
+
+    if "type" not in df.columns:
+        st.info("No publication type information is available to build this chart.")
+        return
+    df["type"] = df["type"].fillna("").astype(str).str.strip()
+    df.loc[df["type"] == "", "type"] = "unknown"
+
+    grouped = (
+        df.groupby("type", dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
+    )
+    if grouped.empty:
+        st.info("No publication type data available for this period.")
+        return
+    grouped["percentage"] = grouped["count"] / grouped["count"].sum() * 100
+
+    chart = (
+        alt.Chart(grouped)
+        .mark_arc(innerRadius=70)
+        .encode(
+            theta=alt.Theta("count:Q", title="Publications"),
+            color=alt.Color(
+                "type:N",
+                title="Publication type",
+                legend=alt.Legend(columns=2, labelLimit=240),
+            ),
+            tooltip=[
+                alt.Tooltip("type:N", title="Publication type"),
+                alt.Tooltip("count:Q", format="d", title="Publications"),
+                alt.Tooltip("percentage:Q", format=".1f", title="Share (%)"),
+            ],
+        )
+        .properties(
+            width=1650,
+            height=450,
+            title="Publication type distribution in the selected time frame",
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def render_author_oa_chart(rows: List[Dict[str, Any]], start_date: str, end_date: str, max_authors: int = 20):
     st.subheader("OA distribution by author", divider="violet")
     if not rows:
@@ -1014,6 +1093,8 @@ def main():
     render_author_oa_chart(all_rows, from_date_str, to_date_str)
     st.write("")
     render_oa_status_chart(all_rows, from_date_str, to_date_str)
+    st.write("")
+    render_publication_type_chart(all_rows, from_date_str, to_date_str)
 
     st.write("")
     st.divider()
