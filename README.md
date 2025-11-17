@@ -19,16 +19,16 @@ A live demo is available at [Streamlit Cloud - Aurora SDG Publicaton Classifier]
 ```mermaid
 flowchart TB
     A[User picks ROR + options] --> B[Fetch OpenAlex works]
-    B --> C{Abstract available?}
+    B --> C{Abstract available}
     C -->|Yes| D[Use OpenAlex abstract]
-    C -->|No| E{Cached abstract?}
+    C -->|No| E{Cached abstract}
     E -->|Yes| D
-    E -->|No| F{Semantic Scholar (via DOI)?}
+    E -->|No| F{Semantic Scholar via DOI}
     F -->|Found| D
-    F -->|Missing| G{Google Scholar fallback?}
+    F -->|Missing| G{Google Scholar fallback}
     G -->|Found| D
     G -->|Still missing| H[Use title for SDG]
-    D --> I{SDG cached?}
+    D --> I{SDG cached}
     H --> I
     I -->|Cache valid| J[Reuse SDG results]
     I -->|Needs run| K[Call Aurora classifier]
