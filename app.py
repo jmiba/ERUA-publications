@@ -756,7 +756,9 @@ def main():
         st.error("The ROR value must look like https://ror.org/XXXXXXXXX.")
         return
     
-    st.header("Run query and download results", divider="rainbow")
+    st.write("")
+    st.divider()
+    st.header("Run query and preview results", divider="rainbow")
 
     current_params = {
         "ror": ror_url,
@@ -978,7 +980,8 @@ def main():
     render_oa_status_chart(all_rows, from_date_str, to_date_str)
 
     st.write("")
-    st.subheader("Download data sets", divider="gray")
+    st.divider()
+    st.header("Download data set", divider="rainbow")
     export_rows = rows or all_rows
     excel_bytes = rows_to_excel_bytes(export_rows, CSV_FIELDNAMES) if export_rows else None
     if excel_bytes:
