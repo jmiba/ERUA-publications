@@ -4,7 +4,7 @@ import math
 import re
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -67,6 +67,25 @@ OA_STATUS_COLORS = {
     "green": "#22c55e",
     "bronze": "#cd7f32",
     "closed": "#6b7280",
+}
+SDG_COLORS = {
+    "1": "#e5243b",   # No Poverty
+    "2": "#dda63a",   # Zero Hunger
+    "3": "#4c9f38",   # Good Health and Well-being
+    "4": "#c5192d",   # Quality Education
+    "5": "#ff3a21",   # Gender Equality
+    "6": "#26bde2",   # Clean Water and Sanitation
+    "7": "#fcc30b",   # Affordable and Clean Energy
+    "8": "#a21942",   # Decent Work and Economic Growth
+    "9": "#fd6925",   # Industry, Innovation and Infrastructure
+    "10": "#dd1367",  # Reduced Inequalities
+    "11": "#fd9d24",  # Sustainable Cities and Communities
+    "12": "#bf8b2e",  # Responsible Consumption and Production
+    "13": "#3f7e44",  # Climate Action
+    "14": "#0a97d9",  # Life Below Water
+    "15": "#56c02b",  # Life on Land
+    "16": "#00689d",  # Peace, Justice and Strong Institutions
+    "17": "#19486a",  # Partnerships for the Goals
 }
 RADIO_CHECKBOX_CSS = """
 <style>
@@ -216,9 +235,10 @@ def parse_sdg_formatted(value: str) -> List[Tuple[str, float, str]]:
     return entries
 
 
-def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, float]]:
-    """Combine SDG percentages across all rows for chart rendering."""
+def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, str, float]]:
+    """Combine SDG percentages across all rows, keeping codes for coloring."""
     totals: Dict[str, float] = {}
+    labels: Dict[str, str] = {}
     for row in rows:
         formatted = row.get("sdg_formatted") or ""
         for code, pct, name in parse_sdg_formatted(formatted):
@@ -227,23 +247,37 @@ def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, float]]:
             label = f"SDG {code}"
             if name:
                 label = f"{label} ({name})"
-            totals[label] = totals.get(label, 0.0) + pct
-    return sorted(totals.items(), key=lambda pair: pair[1], reverse=True)
+            labels.setdefault(code, label)
+            totals[code] = totals.get(code, 0.0) + pct
+    sorted_totals = sorted(totals.items(), key=lambda pair: pair[1], reverse=True)
+    return [(code, labels.get(code, f"SDG {code}"), value) for code, value in sorted_totals]
 
 
-def render_sdg_pie_chart(data: List[Tuple[str, float]], title: str):
+def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
     """Display an Altair donut chart summarizing SDG distribution."""
     if not data:
         st.info(f"No SDG predictions available for {title.lower()}.")
         return
-    df = pd.DataFrame(data, columns=["SDG", "Value"])
+    df = pd.DataFrame(data, columns=["code", "SDG", "Value"])
+    domain: List[str] = []
+    colors: List[str] = []
+    seen: Set[str] = set()
+    for code, label, _ in data:
+        if label in seen:
+            continue
+        domain.append(label)
+        colors.append(SDG_COLORS.get(code, "#9ca3af"))
+        seen.add(label)
     chart = (
         alt.Chart(df)
         .mark_arc(innerRadius=70)
         .encode(
             theta="Value",
-            color=alt.Color("SDG")
-            .legend(columns=1, labelLimit=300, titleLimit=300, title="Sustainable Development Goals"),
+            color=alt.Color(
+                "SDG",
+                scale=alt.Scale(domain=domain, range=colors),
+                legend=alt.Legend(columns=1, labelLimit=300, titleLimit=300, title="Sustainable Development Goals"),
+            ),
             tooltip=[
                 alt.Tooltip("SDG", title="Sustainable Development Goal"),
                 alt.Tooltip("Value", format=".1f", title="Concordance in %"),
