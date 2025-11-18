@@ -236,7 +236,7 @@ def parse_sdg_formatted(value: str) -> List[Tuple[str, float, str]]:
 
 
 def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, str, float]]:
-    """Combine SDG percentages across all rows, keeping codes for coloring."""
+    """Combine SDG percentages across all rows, normalize to 100%, keep codes for coloring."""
     totals: Dict[str, float] = {}
     labels: Dict[str, str] = {}
     for row in rows:
@@ -250,7 +250,13 @@ def aggregate_sdg_counts(rows: List[Dict[str, Any]]) -> List[Tuple[str, str, flo
             labels.setdefault(code, label)
             totals[code] = totals.get(code, 0.0) + pct
     sorted_totals = sorted(totals.items(), key=lambda pair: pair[1], reverse=True)
-    return [(code, labels.get(code, f"SDG {code}"), value) for code, value in sorted_totals]
+    total_pct = sum(value for _, value in sorted_totals)
+    if total_pct <= 0:
+        return []
+    return [
+        (code, labels.get(code, f"SDG {code}"), (value / total_pct) * 100.0)
+        for code, value in sorted_totals
+    ]
 
 
 def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
