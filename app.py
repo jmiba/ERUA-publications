@@ -4,7 +4,7 @@ import math
 import re
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -259,15 +259,16 @@ def render_sdg_pie_chart(data: List[Tuple[str, str, float]], title: str):
         st.info(f"No SDG predictions available for {title.lower()}.")
         return
     df = pd.DataFrame(data, columns=["code", "SDG", "Value"])
-    domain: List[str] = []
-    colors: List[str] = []
-    seen: Set[str] = set()
+    label_by_code: Dict[str, str] = {}
     for code, label, _ in data:
-        if label in seen:
-            continue
-        domain.append(label)
-        colors.append(SDG_COLORS.get(code, "#9ca3af"))
-        seen.add(label)
+        label_by_code.setdefault(code, label)
+
+    def _code_sort_key(code: str) -> Tuple[int, str]:
+        return (int(code), code) if code.isdigit() else (99, code)
+
+    ordered_codes = sorted(label_by_code.keys(), key=_code_sort_key)
+    domain = [label_by_code[code] for code in ordered_codes]
+    colors = [SDG_COLORS.get(code, "#9ca3af") for code in ordered_codes]
     chart = (
         alt.Chart(df)
         .mark_arc(innerRadius=70)
