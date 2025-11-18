@@ -897,7 +897,7 @@ def main():
     st.set_page_config(page_title="Aurora SDG Publication Classifier", layout="wide")
     st.title("Aurora SDG Publication Classifier")
     st.caption(
-        "Fetch publications for a ROR institution, classify them with Aurora SDG models, and export a CSV ready for analysis."
+        "Fetch publications for a institution, relate them to the 17 UN Sustainanble Development Goals (SDGs) using [Aurora SDG classifier](https://aurora-universities.eu/sdg-research/classify/), and export a CSV ready for analysis."
     )
 
     user_agent, has_user_agent_secret = resolve_user_agent()
