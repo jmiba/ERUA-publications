@@ -29,6 +29,7 @@ SECRET_HTTP_USER_AGENT = "http_user_agent"
 SECRET_SEMANTIC_SCHOLAR_KEY = "semantic_scholar_api_key"
 SECRET_GOOGLE_SCHOLAR_ENABLED = "google_scholar_enabled"
 SECRET_DEFAULT_START = "advanced_options.default_from_date"
+SECRET_SERPAPI_KEY = "serpapi_api_key" # New constant for SerpApi Key
 _SECRETS: Dict[str, Any] = {}
 PREVIEW_COLUMNS = [
     "openalex_id",
@@ -189,8 +190,12 @@ def resolve_google_scholar_enabled() -> bool:
     """Decide whether Google Scholar lookups are allowed."""
     value = get_secret_bool(SECRET_GOOGLE_SCHOLAR_ENABLED)
     if value is None:
-        return True
+        return False
     return value
+
+def resolve_serpapi_key() -> Optional[str]:
+    """Read the SerpApi API key (if supplied)."""
+    return get_secret_text(SECRET_SERPAPI_KEY)
 
 
 def build_preview_rows(
@@ -958,6 +963,7 @@ def main():
     model = render_model_selector()
     semantic_scholar_key = resolve_semantic_scholar_key()
     google_scholar_enabled = resolve_google_scholar_enabled()
+    serpapi_api_key = resolve_serpapi_key() # Retrieve SerpApi key
     default_from_date = get_secret_text(SECRET_DEFAULT_START)
     from_date_str, to_date_str, limit_rows = render_advanced_options(
         semantic_scholar_key,
@@ -976,7 +982,10 @@ def main():
     st.divider()
     st.header("Run query and preview results", divider="rainbow")
     if google_scholar_enabled:
-        st.info("Google Scholar abstract lookups enabled.", icon=":material/check_circle:")
+        if serpapi_api_key:
+            st.info("Google Scholar abstract lookups enabled (via SerpApi).", icon=":material/check_circle:")
+        else:
+            st.warning("Google Scholar abstract lookups enabled, but `serpapi_api_key` not set. Scholarly will be used which may be unreliable.")
 
     current_params = {
         "ror": ror_url,
@@ -1063,6 +1072,7 @@ def main():
                     user_agent=user_agent.strip() or DEFAULT_USER_AGENT,
                     semantic_scholar_api_key=semantic_scholar_key,
                     enable_google_scholar=google_scholar_enabled,
+                    serpapi_api_key=serpapi_api_key, # Pass SerpApi key
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
                 )
@@ -1109,6 +1119,7 @@ def main():
     )
     st.success(
         f"Wrote **{stats.total_processed:,}** rows. "
+        f"Abstracts available: **{stats.total_abstracts_available:,}**. " # New line
         f"OpenAlex missing abstracts: **{stats.openalex_abstract_missing:,}**; "
         f"retrieved from Semantic Scholar: **{stats.ss_abstract_retrieved:,}**"
         f"{gs_note}"

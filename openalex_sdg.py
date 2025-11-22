@@ -13,10 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
 
-try:  # pragma: no cover - optional dependency
-    from scholarly import scholarly, ProxyGenerator  # type: ignore
-except Exception:  # pragma: no cover - no scholarly installed / available
-    scholarly = None
+# scholarly import and its associated function are removed
 
 from cache_db import (
     get_cached_sdg_result,
@@ -30,7 +27,8 @@ BASE_WORKS = "https://api.openalex.org/works"
 BASE_INSTITUTIONS = "https://api.openalex.org/institutions"
 AURORA_BASE = "https://aurora-sdg.labs.vu.nl/classifier/classify"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract"
-SCHOLAR_MAX_RESULTS = 5
+SERPAPI_GS_API = "https://serpapi.com/search" # New constant for SerpApi Google Scholar API
+
 
 PER_PAGE = 200  # OpenAlex max
 DEFAULT_FROM_DATE = "2023-01-01"
@@ -64,6 +62,7 @@ class FetchStats:
     openalex_abstract_missing: int
     ss_abstract_retrieved: int
     gs_abstract_retrieved: int
+    total_abstracts_available: int = 0 # New field
 
 
 def too_short_for_model(model: str, text: str) -> bool:
@@ -76,7 +75,6 @@ def is_ror_url(value: str) -> bool:
     """Lightweight validation for ROR URLs (https://ror.org/XXXXXXXXX)."""
     return bool(re.match(r"^https?://ror\.org/[0-9a-z]{9}$", value.strip(), flags=re.I))
 
-
 def search_institutions_by_name(
     name: str, user_agent: str = DEFAULT_USER_AGENT, limit: int = 10
 ) -> List[dict]:
@@ -86,7 +84,6 @@ def search_institutions_by_name(
     response = requests.get(BASE_INSTITUTIONS, params=params, headers=headers, timeout=30)
     response.raise_for_status()
     return response.json().get("results", [])
-
 
 def reconstruct_abstract(inv: Optional[dict]) -> str:
     """Rebuild abstract text from OpenAlex 'abstract_inverted_index' or '_v3'."""
@@ -110,7 +107,6 @@ def reconstruct_abstract(inv: Optional[dict]) -> str:
             )
     return " ".join(tokens_by_pos).strip()
 
-
 def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, str]:
     """Convert OpenAlex authorship structures into 'A; B' strings."""
     if not authorships:
@@ -133,7 +129,6 @@ def flatten_authors_and_institutions(authorships: Sequence[dict]) -> Tuple[str, 
             inst_names.append(name)
     return "; ".join(author_names), "; ".join(inst_names)
 
-
 def clean_html_fragment(text: str) -> str:
     """Strip HTML tags/entities and normalize whitespace."""
     if not text:
@@ -143,7 +138,6 @@ def clean_html_fragment(text: str) -> str:
     normalized = re.sub(r"\s+", " ", without_tags)
     return normalized.strip()
 
-
 def _normalize_text_for_match(text: str) -> str:
     """Normalize and lowercase text for equality checks ignoring punctuation."""
     if not text:
@@ -152,7 +146,6 @@ def _normalize_text_for_match(text: str) -> str:
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = re.sub(r"[^\w\s]", " ", text).lower()
     return re.sub(r"\s+", "", text).strip()
-
 
 def _normalize_author_token(name: str) -> str:
     """Produce a stable author token (surname or first token if comma style)."""
@@ -167,88 +160,98 @@ def _normalize_author_token(name: str) -> str:
         return ""
     return parts[0] if has_comma else parts[-1]
 
-
-def _author_tokens_from_string(authors: str) -> Set[str]:
-    """Tokenize ';'-separated author strings into normalized identifiers."""
-    tokens: Set[str] = set()
-    if not authors:
-        return tokens
-    for raw in authors.split(";"):
-        token = _normalize_author_token(raw.strip())
-        if token:
-            tokens.add(token)
-    return tokens
-
-
-def get_abstract_from_google_scholar(title: str, authors: str) -> Optional[str]:
-    """Look up a publication on Google Scholar via scholarly and return its abstract."""
-    if scholarly is None or not title:
-        return None
-    normalized_target = _normalize_text_for_match(title)
-    if not normalized_target:
-        return None
-    target_authors = _author_tokens_from_string(authors)
-    pg = ProxyGenerator()
-    try:
-        success = pg.FreeProxies()
-    except TypeError as exc:
-        logging.warning(
-            "scholarly proxy setup failed due to incompatible httpx (%s); not querying Google Scholar",
-            exc,
-        )
-        return None
-    except Exception as exc:
-        logging.debug("scholarly proxy setup failed: %s", exc)
-        return None
-    if not success:
-        logging.info("No free proxy available; skipping Google Scholar fetch for '%s'", title)
-        return None
-    scholarly.use_proxy(pg)
-    try:
-        search_iter = scholarly.search_pubs(title)
-    except Exception as exc:  # pragma: no cover - network / import dependent
-        logging.warning("Google Scholar search failed for title '%s': %s", title, exc)
+def get_abstract_from_serpapi_google_scholar(
+    title: str,
+    authors: str,
+    api_key: Optional[str],
+    session: requests.Session,
+    retries: int = 3,
+    pause: float = 0.5,
+) -> Optional[str]:
+    """Fetches abstract from Google Scholar via SerpApi."""
+    if not api_key or not title:
         return None
 
-    checked = 0
-    while checked < SCHOLAR_MAX_RESULTS:
+    query = f"{title} {authors}" if authors else title
+    if not query:
+        return None # Should not happen if title is present but just in case
+
+    params = {
+        "engine": "google_scholar",
+        "q": query,
+        "api_key": api_key,
+        "hl": "en", # Host language for results
+        "num": 5, # Number of results, usually enough to find the paper
+    }
+
+    for attempt in range(1, retries + 1):
         try:
-            result = next(search_iter)
-        except StopIteration:
-            break
-        except Exception as exc:  # pragma: no cover - iteration failure
-            logging.warning("Google Scholar iteration failed for '%s': %s", title, exc)
-            break
-        checked += 1
-        bib = result.get("bib") if isinstance(result, dict) else {}
-        candidate_title = (bib or {}).get("title") or ""
-        if not candidate_title:
-            continue
-        normalized_candidate = _normalize_text_for_match(candidate_title)
-        if normalized_candidate != normalized_target:
-            continue
-        candidate_authors = (bib or {}).get("author") or []
-        if target_authors and candidate_authors:
-            norm_candidates = {_normalize_author_token(name) for name in candidate_authors if name}
-            if not norm_candidates & target_authors:
+            resp = session.get(SERPAPI_GS_API, params=params, timeout=20)
+            if resp.status_code == 429: # Rate limit
+                time.sleep(pause * attempt)
                 continue
-        try:
-            filled = scholarly.fill(result)  # type: ignore[arg-type]
-        except Exception as exc:  # pragma: no cover - network heavy
-            logging.debug("Google Scholar fill failed for '%s': %s", title, exc)
-            filled = result
-        bib_data = filled.get("bib") if isinstance(filled, dict) else bib
-        abstract = (bib_data or {}).get("abstract") or (bib or {}).get("abstract")
-        if abstract:
-            logging.info(
-                "Google Scholar abstract retrieved for '%s' (result #%d)",
-                candidate_title,
-                checked,
-            )
-            return clean_html_fragment(abstract)
-    logging.info("Google Scholar abstract not found for '%s'", title)
+            resp.raise_for_status()
+            data = resp.json()
+            norm_title = _normalize_text_for_match(title)
+
+            for result in data.get("organic_results", []):
+                result_title = result.get("title")
+                # Basic title match to ensure we're looking at the right paper
+                if not result_title:
+                    continue
+                norm_result_title = _normalize_text_for_match(result_title)
+                # Relaxed matching: check if one is a prefix of the other.
+                if norm_result_title.startswith(norm_title) or norm_title.startswith(norm_result_title):
+                    abstract = result.get("snippet") # SerpApi often provides abstract in 'snippet'
+                    if abstract:
+                        logging.info("SerpApi Google Scholar abstract retrieved for '%s'", title)
+                        return clean_html_fragment(abstract)
+
+            logging.info("Serpapi Google Scholar abstract not found for '%s' (no matching results with snippets)", title)
+            return None
+
+        except requests.RequestException as exc:
+            logging.warning(f"Serpapi call failed for '{title}' (attempt {attempt}): {exc}")
+            if attempt == retries:
+                return None
+            time.sleep(pause * attempt)
     return None
 
+    params = {
+        "engine": "google_scholar",
+        "q": query,
+        "api_key": api_key,
+        "hl": "en", # Host language for results
+        "num": 5, # Number of results, usually enough to find the paper
+    }
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = session.get(SERPAPI_GS_API, params=params, timeout=20)
+            if resp.status_code == 429: # Rate limit
+                time.sleep(pause * attempt)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+
+            for result in data.get("organic_results", []):
+                result_title = result.get("title")
+                # Basic title match to ensure we're looking at the right paper
+                if result_title and _normalize_text_for_match(result_title) == _normalize_text_for_match(title):
+                    abstract = result.get("snippet") # SerpApi often provides abstract in 'snippet'
+                    if abstract:
+                        logging.info("Serpapi Google Scholar abstract retrieved for '%s'", title)
+                        return clean_html_fragment(abstract)
+
+            logging.info("Serpapi Google Scholar abstract not found for '%s'", title)
+            return None
+
+        except requests.RequestException as exc:
+            logging.warning(f"Serpapi call failed for '{title}' (attempt {attempt}): {exc}")
+            if attempt == retries:
+                return None
+            time.sleep(pause * attempt)
+    return None
 
 def abbreviate_authors(value: str) -> str:
     """Return compact 'First Author et al.' preview for UI progress messages."""
@@ -261,9 +264,11 @@ def abbreviate_authors(value: str) -> str:
         return authors[0]
     return f"{authors[0]} et al."
 
-
 def make_filter(
-    ror_url: str, from_date: Optional[str], work_type: Optional[str], to_date: Optional[str] = None
+    ror_url: str,
+    from_date: Optional[str],
+    work_type: Optional[str],
+    to_date: Optional[str] = None
 ) -> str:
     parts = [
         f"institutions.ror:{ror_url}",
@@ -276,7 +281,6 @@ def make_filter(
     if work_type:
         parts.append(f"type:{work_type}")
     return ",".join(parts)
-
 
 def classify_text_aurora(
     model: str,
@@ -318,7 +322,6 @@ def classify_text_aurora(
             time.sleep(pause * attempt)
     return None, "unknown"
 
-
 def get_abstract_from_semantic_scholar(
     doi: str,
     session: Optional[requests.Session] = None,
@@ -353,10 +356,9 @@ def get_abstract_from_semantic_scholar(
             time.sleep(pause * attempt)
     return None
 
-
 def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
     """
-    Returns '\\n'-joined strings like "84% SDG 10 (Reduced inequalities)".
+    Returns '\n'-joined strings like "84% SDG 10 (Reduced inequalities)".
     Handles multiple API variants.
     """
 
@@ -439,13 +441,11 @@ def format_sdg_predictions(sdg_json: Optional[dict]) -> str:
     items.sort(key=lambda item: item[0], reverse=True)
     return "\n".join(fmt_line(score, code, name) for score, code, name in items)
 
-
 def sanitize_filename(value: str) -> str:
     """Strip unsafe characters so the filename can be used on most OSes."""
     value = unicodedata.normalize("NFKD", value)
     value = re.sub(r"[^\w\-\.]+", "_", value, flags=re.UNICODE)
     return value.strip("_")
-
 
 def fetch_works_with_sdg(
     ror_url: str,
@@ -457,6 +457,7 @@ def fetch_works_with_sdg(
     user_agent: str = DEFAULT_USER_AGENT,
     semantic_scholar_api_key: Optional[str] = None,
     enable_google_scholar: bool = True,
+    serpapi_api_key: Optional[str] = None, # New parameter
     progress_callback: ProgressHook = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[Dict[str, object]], FetchStats]:
@@ -544,13 +545,18 @@ def fetch_works_with_sdg(
                         abstract_text = ss_abstract
                         stats.ss_abstract_retrieved += 1
             if enable_google_scholar and not abstract_text:
-                scholar_abstract = get_abstract_from_google_scholar(title, authors_str)
-                if scholar_abstract:
-                    abstract_text = scholar_abstract
+                serpapi_abstract = get_abstract_from_serpapi_google_scholar(
+                    title, authors_str, api_key=serpapi_api_key, session=session
+                )
+                if serpapi_abstract:
+                    abstract_text = serpapi_abstract
                     stats.gs_abstract_retrieved += 1
             clean_cached_abs = clean_html_fragment(cached_abstract)
             abstract_text = clean_html_fragment(abstract_text)
             abstract_updated = bool(abstract_text and abstract_text != clean_cached_abs)
+
+            if abstract_text: # Increment if an abstract is available
+                stats.total_abstracts_available += 1
 
             text_for_sdg = abstract_text if abstract_text else title
             sdg_json: Optional[dict] = None
@@ -662,6 +668,7 @@ __all__ = [
     "FetchCancelled",
     "FetchStats",
     "SEMANTIC_SCHOLAR_API",
+    "SERPAPI_GS_API",
     "fetch_works_with_sdg",
     "format_sdg_predictions",
     "is_ror_url",
