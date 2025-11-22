@@ -986,23 +986,35 @@ def main():
         "to": to_date_str,
         "limit": limit_rows,
     }
+
+    # If a fetch is running, check if parameters have changed.
+    # If they have, request a cancellation.
+    if st.session_state.get("fetch_in_progress"):
+        ongoing_fetch_params = st.session_state.get("fetch_params")
+        if ongoing_fetch_params and ongoing_fetch_params != current_params:
+            st.session_state["fetch_cancel_requested"] = True
+            st.toast("Parameters changed, cancelling active fetch...", icon="🛑")
+
     result_payload = st.session_state.get(RESULT_SESSION_KEY)
     st.session_state.setdefault("fetch_cancel_requested", False)
     st.session_state.setdefault("fetch_in_progress", False)
-    cancel_container = st.empty()
+
+    cancel_button_placeholder = st.empty() # New placeholder for the cancel button
+
+    run_button_clicked = st.button("Fetch works and build CSV", type="primary", key="main_fetch_button")
+    if run_button_clicked: # Renamed run_button to run_button_clicked
+        st.session_state["fetch_params"] = current_params
+        st.session_state["fetch_cancel_requested"] = False
+        st.session_state["fetch_in_progress"] = True
+        st.rerun() # Trigger a rerun to enter the 'fetch_in_progress' block below
+
+    # This block handles rendering the cancel button and the actual fetch logic
     if st.session_state.get("fetch_in_progress"):
-        if cancel_container.button("Cancel fetch", type="secondary"):
+        # Render the cancel button inside its dedicated placeholder
+        if cancel_button_placeholder.button("Cancel fetch", type="secondary", key="cancel_fetch_button"):
             st.session_state["fetch_cancel_requested"] = True
             st.toast("Cancelling fetch…", icon=":material/stop_circle:")
 
-    run_button = st.button("Fetch works and build CSV", type="primary")
-    if run_button:
-        st.session_state["fetch_cancel_requested"] = False
-        st.session_state["fetch_in_progress"] = True
-        cancel_container.empty()
-        cancel_container = st.empty()
-        if cancel_container.button("Cancel fetch", type="secondary"):
-            st.session_state["fetch_cancel_requested"] = True
         progress_bar = st.progress(0)
         progress_text = st.empty()
         progress_detail = st.empty()
@@ -1055,19 +1067,19 @@ def main():
                     cancel_check=cancel_check,
                 )
             except FetchCancelled:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
                 st.info("Fetch cancelled.", icon="⏹️")
                 return
             except requests.HTTPError as exc:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
                 st.error(f"Request failed: {exc}")
                 return
             except requests.RequestException as exc:
-                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
+                _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
                 st.error(f"Network error: {exc}")
                 return
 
-        _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_container)
+        _reset_fetch_state(progress_bar, progress_text, progress_detail, cancel_button_placeholder) # Use new placeholder
         csv_bytes = rows_to_csv_bytes(rows)
         result_payload = {
             "csv_bytes": csv_bytes,
@@ -1079,6 +1091,8 @@ def main():
         st.session_state[RESULT_SESSION_KEY] = result_payload
         st.session_state.pop("preview_focus_index", None)
         st.session_state["preview_page"] = 1
+        st.rerun() # Rerun to display results after fetch completes.
+
     elif not result_payload:
         st.info("Click the button above to fetch publications.")
         return
